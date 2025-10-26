@@ -1,0 +1,24 @@
+data:
+  input_path: data/raw/events.xlsx # cambia si tu archivo tiene otro nombre
+  processed_path: data/processed/events.parquet
+  var_params_path: data/processed/var_params.parquet
+  id_column: event_id
+  date_ident_col: date_ident
+  label_col: loss_event
+  loss_net_usd_col: loss_net_usd
+
+ml:
+  seed: 42
+  test_size: 0.25
+  threshold_strategy: max_f1 # max_f1 | recall_first
+  recall_target: 0.75 # usado si strategy=recall_first
+
+var:
+  z_value: 1.645 # 95% confianza
+  horizon_T: 1.0 # 1 año
+  segment_keys: ["event_type", "unit_impacted", "product_service"]
+
+impact:
+  m_effectiveness: 0.5 # 50% mitigación
+  review_cost_per_alert: 0.0
+  rc_pre: 2500000
