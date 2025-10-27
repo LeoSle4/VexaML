@@ -44,3 +44,14 @@ impact:
   m_effectiveness: 0.5
   review_cost_per_alert: 0.0
   rc_pre: 2500000
+
+rc:
+  method: "BIA"                 # Basilea BIA
+  alpha: 0.15                   # parámetro del Comité
+  n_years: 3                    # ventana de años
+  incomes_path: "data/finance/gross_income.csv"
+  by_unit: true                 # true si tendrás IB por unidad (opcional)
+
+rc_thresholds:                  # (opcional) para clasificar RC
+  low: 500000
+  medium: 1500000

@@ -7,7 +7,7 @@ from datetime import date
 from calendar import monthrange
 from pathlib import Path
 
-st.set_page_config(page_title="Risk-ML", layout="centered")
+st.set_page_config(page_title="VEXA-ML", layout="centered")
 st.title("Clasificador de Riesgo Operativo")
 
 # ---------------------- Config / util ----------------------
@@ -128,13 +128,15 @@ st.caption(
     f"Año: **{year}** · Mes: **{month}** · Trimestre: **{quarter}** · Weekday: **{weekday}** · Month-end: **{is_month_end}**"
 )
 
-st.subheader("Recencia / Frecuencia (opcional)")
+st.divider()
+st.subheader("Recencia / Frecuencia")
 c3, c4, c5, c6 = st.columns(4)
 n30 = c3.number_input("Eventos 30d (unidad)", min_value=0, value=0)
 n60 = c4.number_input("Eventos 60d (unidad)", min_value=0, value=0)
 n90 = c5.number_input("Eventos 90d (unidad)", min_value=0, value=0)
 dsl = c6.number_input("Días desde último (unidad)", min_value=0, value=9999)
 
+st.divider()
 st.subheader("Consecuencia (C) para R = C × P̂")
 consequence = st.slider(
     "Consecuencia", min_value=1.0, max_value=5.0, value=3.0, step=0.5
@@ -189,6 +191,7 @@ def render_result(res: dict):
         f"{res['R_index']:.3f}" if res.get("R_index") is not None else "—",
     )
 
+    # VaR̂ y detalles
     st.metric("VaR̂ (segmento)", f"{res.get('VaR_hat', 0.0):.2f}")
     seg = res.get("segment", "—")
     th = res.get("used_threshold", None)
@@ -203,31 +206,32 @@ def render_result(res: dict):
         extra += f"  |  VA={va_seg:.0f}, O={o_seg:.3f}"
     st.caption(extra)
 
+    if float(res.get("VaR_hat", 0.0)) == 0.0:
+        st.warning(
+            "VaR̂ es 0 para este segmento. Asegúrate de haber generado "
+            "`data/processed/var_params.parquet` y de que el segmento exista (event_type|unit_impacted|product_service)."
+        )
+
+    # RC (BIA)
+    rc = res.get("rc", {}) or {}
+    rc_val = rc.get("rc", None)
+    if rc_val is not None:
+        rc_level = rc.get("level", "bank")
+        rc_cat = rc.get("category", "—")
+        rc_years = rc.get("years_used", [])
+        st.metric("RC (BIA)", f"${rc_val:,.0f}")
+        st.caption(
+            f"Nivel: {rc_level} · Categoría: {rc_cat} · Años usados: {', '.join(map(str, rc_years)) or '—'}"
+        )
+
     with st.expander("Ver JSON de respuesta"):
         st.code(json.dumps(res, indent=2, ensure_ascii=False), language="json")
 
 
-use_example = False
-if catalogs and random_row:
-    if c7.button("Usar ejemplo del dataset"):
-        # Solo reemplazamos los valores al armar el payload (no forzamos los widgets)
-        unit_impacted = random_row.get("unit_impacted", unit_impacted)
-        product_service = random_row.get("product_service", product_service)
-        process_impacted = random_row.get("process_impacted", process_impacted)
-        event_type = random_row.get("event_type", event_type)
-        risk_assoc = random_row.get("risk_assoc", risk_assoc)
-        di = pd.to_datetime(random_row.get("date_ident"))
-        if pd.notna(di):
-            pd_date = di.date()
-        else:
-            pd_date = pred_date
-        # Derivados se recalculan al construir el payload desde UI (mantenemos la fecha actual)
-        use_example = True
-        st.info("Ejemplo cargado. Ajusta si deseas y presiona Predecir.")
-
 predict_clicked = c8.button("Predecir", type="primary", use_container_width=True)
 
 # ---------------------- Predicción desde UI ----------------------
+st.divider()
 if predict_clicked:
     payload = build_payload_from_ui()
     with st.spinner("Calculando…"):
@@ -236,111 +240,3 @@ if predict_clicked:
         st.error(f"No se pudo obtener predicción: {err}")
     elif res:
         render_result(res)
-
-# ---------------------- Casos de prueba (A–E) ----------------------
-st.divider()
-st.subheader("Casos de prueba (demo)")
-
-demo_cases = {
-    "A · Gestión de Activos | Gestión de Activos (alto)": {
-        "unit_impacted": "Gestión de Activos",
-        "product_service": "Gestión de Activos",
-        "process_impacted": "No Aplica",
-        "event_type": "Evento de Pérdida",
-        "risk_assoc": "Fallas en procesos contables",
-        "n30": 4,
-        "n60": 7,
-        "n90": 10,
-        "dsl": 5,
-        "C": 4.0,
-    },
-    "B · Mercado de Capitales | Mercado de Capitales (medio/alto)": {
-        "unit_impacted": "Mercado de Capitales",
-        "product_service": "Mercado de Capitales",
-        "process_impacted": "No Aplica",
-        "event_type": "Evento de Pérdida",
-        "risk_assoc": "Errores de registro/operativa",  # si no existe en catálogo, usa 'Fallas en registro de instrucción de operaciones' u 'Otro'
-        "n30": 3,
-        "n60": 5,
-        "n90": 8,
-        "dsl": 12,
-        "C": 3.5,
-    },
-    "C · Negocios de Confianza | Titulizadora (medio)": {
-        "unit_impacted": "Negocios de Confianza",
-        "product_service": "Titulizadora",
-        "process_impacted": "No Aplica",
-        "event_type": "Evento de Pérdida",
-        "risk_assoc": "Fallas en el servicio del proveedor",
-        "n30": 1,
-        "n60": 2,
-        "n90": 2,
-        "dsl": 40,
-        "C": 3.0,
-    },
-    "D · Finanzas Corporativas | Adm. Portafolios (bajo, VaR≈0)": {
-        "unit_impacted": "Finanzas Corporativas",
-        "product_service": "Administración de Portafolios",
-        "process_impacted": "Administración del Fideicomiso de Inversiones",
-        "event_type": "Evento de Pérdida",
-        "risk_assoc": "Otro",
-        "n30": 0,
-        "n60": 0,
-        "n90": 1,
-        "dsl": 180,
-        "C": 2.0,
-    },
-    "E · Mercado de Capitales fin de año (stress)": {
-        "unit_impacted": "Mercado de Capitales",
-        "product_service": "Mercado de Capitales",
-        "process_impacted": "No Aplica",
-        "event_type": "Evento de Pérdida",
-        "risk_assoc": "Errores de registro/operativa",
-        "n30": 6,
-        "n60": 12,
-        "n90": 18,
-        "dsl": 1,
-        "C": 4.5,
-        # si quieres simular fin de mes: cambia arriba la fecha a 31/dic
-    },
-}
-
-dcol1, dcol2 = st.columns([2, 1])
-demo_sel = dcol1.selectbox("Selecciona un caso de prueba", list(demo_cases.keys()))
-send_demo = dcol2.button("Predecir caso de prueba", use_container_width=True)
-
-if send_demo:
-    demo = demo_cases[demo_sel]
-    payload = {
-        "unit_impacted": demo["unit_impacted"],
-        "product_service": demo["product_service"],
-        "process_impacted": demo["process_impacted"],
-        "event_type": demo["event_type"],
-        "risk_assoc": demo["risk_assoc"],
-        "year": int(year),
-        "month": int(month),
-        "quarter": int((month - 1) // 3 + 1),
-        "weekday": int(date.today().weekday()),
-        "is_month_end": int(1 if pred_date.day == monthrange(year, month)[1] else 0),
-        "n_events_30d_unit_impacted": float(demo["n30"]),
-        "n_events_60d_unit_impacted": float(demo["n60"]),
-        "n_events_90d_unit_impacted": float(demo["n90"]),
-        "days_since_last_unit_impacted": float(demo["dsl"]),
-        "consequence": float(demo["C"]),
-    }
-    if use_th_override:
-        payload["threshold_override"] = float(th_override)
-
-    with st.spinner("Calculando (demo)…"):
-        res, err = predict(api_url, payload)
-    if err:
-        st.error(f"No se pudo obtener predicción: {err}")
-    elif res:
-        render_result(res)
-
-# ---------------------- Tips ----------------------
-st.divider()
-st.caption(
-    "Consejo: si ves probabilidades raras con categorías nuevas, usa valores que existan en tu dataset o normaliza categorías en el ETL. "
-    "Si quieres ver más ‘SIN PÉRDIDA’, sube el umbral en ‘Ajustes avanzados’ (p. ej. 0.2–0.4)."
-)
