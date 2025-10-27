@@ -24,10 +24,10 @@ DATA_PATH = Path(CFG["data"]["processed_path"])
 MODEL_PATH = Path("models/model.pkl")
 THRESH_PATH = Path("models/threshold.json")
 SCHEMA_PATH = Path("models/feature_schema.json")
+TRAIN_REPORT = Path("reports/train_report.json")
 
 
 def choose_threshold(y_true, proba, strategy="max_f1", recall_target=0.75):
-    """Selecciona el umbral según estrategia (máx F1 o Recall objetivo)."""
     p, r, th = precision_recall_curve(y_true, proba)
     f1 = (2 * p * r) / (p + r + 1e-9)
     if strategy == "max_f1":
@@ -56,7 +56,7 @@ def main():
         include=["number", "int", "float", "bool"]
     ).columns.tolist()
 
-    # --------- NUEVO: guardar esquema de features ---------
+    # --------- Guardar esquema de features (para la API) ---------
     feature_schema = {
         "all_columns": X.columns.tolist(),
         "num_cols": [c for c in X.columns if c in num_cols],
@@ -67,7 +67,7 @@ def main():
     print(f"[OK] Esquema de features -> {SCHEMA_PATH}")
     print(f"[INFO] num_cols={len(num_cols)} | cat_cols={len(cat_cols)}")
 
-    # --------- Preprocesamiento dinámico ---------
+    # --------- Preprocesamiento ---------
     transformers = []
     if num_cols:
         transformers.append(("num", StandardScaler(with_mean=False), num_cols))
@@ -79,15 +79,30 @@ def main():
                 cat_cols,
             )
         )
-
     if not transformers:
         raise RuntimeError("No se detectaron columnas numéricas ni categóricas en X.")
-
     pre = ColumnTransformer(transformers, remainder="drop")
+
+    # --------- Split en train/test y sub-split en train/val ---------
+    X_train_full, X_test, y_train_full, y_test = train_test_split(
+        X, y, test_size=TEST_SIZE, stratify=y, random_state=SEED
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full,
+        y_train_full,
+        test_size=0.20,
+        stratify=y_train_full,
+        random_state=SEED,
+    )
+
+    # --------- Desbalance: scale_pos_weight calculado en TRAIN ---------
+    pos = int(y_train.sum())
+    neg = int(len(y_train) - pos)
+    spw = float(max(1.0, neg / max(pos, 1)))
 
     # --------- Modelo ---------
     model = XGBClassifier(
-        n_estimators=400,
+        n_estimators=500,
         max_depth=6,
         subsample=0.8,
         colsample_bytree=0.8,
@@ -95,27 +110,30 @@ def main():
         random_state=SEED,
         eval_metric="logloss",
         tree_method="hist",
+        scale_pos_weight=spw,  # <-- clave para recall en clases raras
+        reg_lambda=1.0,
     )
 
     pipe = Pipeline([("pre", pre), ("clf", model)])
 
-    # --------- Split, entrenamiento y umbral ---------
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X, y, test_size=TEST_SIZE, stratify=y, random_state=SEED
-    )
-    pipe.fit(X_tr, y_tr)
+    # --------- Entrenamiento ---------
+    pipe.fit(X_train, y_train)
 
-    proba_tr = pipe.predict_proba(X_tr)[:, 1]
-    th = choose_threshold(y_tr, proba_tr, TH_STRATEGY, RECALL_TARGET)
+    # --------- Umbral en VALIDACIÓN ---------
+    proba_val = pipe.predict_proba(X_val)[:, 1]
+    th = choose_threshold(y_val, proba_val, TH_STRATEGY, RECALL_TARGET)
 
-    # --------- Evaluación rápida en test ---------
-    proba_te = pipe.predict_proba(X_te)[:, 1]
+    # --------- Evaluación final en TEST con ese umbral ---------
+    proba_te = pipe.predict_proba(X_test)[:, 1]
     y_pred = (proba_te >= th).astype(int)
     metrics = {
         "threshold": th,
-        "recall": float(recall_score(y_te, y_pred)),
-        "f1": float(f1_score(y_te, y_pred)),
-        "accuracy": float(accuracy_score(y_te, y_pred)),
+        "recall": float(recall_score(y_test, y_pred)),
+        "f1": float(f1_score(y_test, y_pred)),
+        "accuracy": float(accuracy_score(y_test, y_pred)),
+        "prevalence_train": float(y_train.mean()),
+        "prevalence_test": float(y_test.mean()),
+        "scale_pos_weight": spw,
     }
     print("[TEST]", metrics)
 
@@ -123,8 +141,12 @@ def main():
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipe, MODEL_PATH)
     THRESH_PATH.write_text(json.dumps({"threshold": th}, indent=2), encoding="utf-8")
+    TRAIN_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    TRAIN_REPORT.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
     print(f"[OK] Modelo -> {MODEL_PATH}")
     print(f"[OK] Umbral -> {THRESH_PATH}")
+    print(f"[OK] Reporte -> {TRAIN_REPORT}")
 
 
 if __name__ == "__main__":

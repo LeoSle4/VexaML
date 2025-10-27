@@ -42,7 +42,8 @@
     "action_plan": 303,
     "date_committee": 0,
     "board_flag": 0,
-    "date_recorded": 1001
+    "date_recorded": 1001,
+    "loss_value_usd": 0
   },
   "dupes_event_id": 0
 }

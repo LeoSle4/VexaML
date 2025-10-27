@@ -1,11 +1,10 @@
+# src/etl/01_read_normalize.py
 import pandas as pd
 from pathlib import Path
 
-CFG_IN = Path("configs/config.yml")
-RAW_PATH = Path("data/raw/events.xlsx")  # cambia si tu archivo tiene otro nombre
+RAW_PATH = Path("data/raw/events.xlsx")
 OUT_PATH = Path("data/processed/events_stage1.parquet")
 
-# Mapear cabeceras originales -> nombres canónicos (snake_case)
 COLUMN_MAP = {
     "Nro.": "event_id",
     "Unidad Impactada": "unit_impacted",
@@ -53,8 +52,13 @@ COLUMN_MAP = {
 
 
 def main():
-    df = pd.read_excel(RAW_PATH, dtype=str)
-    df = df.rename(columns=COLUMN_MAP)
+    df = pd.read_excel(RAW_PATH, dtype=str, engine="openpyxl").rename(
+        columns=COLUMN_MAP
+    )
+
+    # Limpia espacios
+    obj = df.select_dtypes(include="object").columns
+    df[obj] = df[obj].apply(lambda s: s.str.strip())
 
     # Fechas
     for c in [
@@ -71,7 +75,22 @@ def main():
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
 
-    # Numéricos
+    # Parser de dinero robusto
+    def parse_money(series: pd.Series) -> pd.Series:
+        s = series.astype(str)
+        s = s.str.replace(r"^\((.*)\)$", r"-\1", regex=True)  # (1,234.56) -> -1,234.56
+        s = s.str.replace(r"[^\d,.\-]", "", regex=True)  # quita símbolos
+        mask_both = s.str.contains(",") & s.str.contains(r"\.")
+        s = s.where(
+            ~mask_both,
+            s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False),
+        )  # 1.234,56 -> 1234.56
+        mask_comma = s.str.contains(",") & ~mask_both
+        s = s.where(
+            ~mask_comma, s.str.replace(",", ".", regex=False)
+        )  # 123,45 -> 123.45
+        return pd.to_numeric(s, errors="coerce")
+
     for c in [
         "loss_gross_usd",
         "reco_ins",
@@ -81,20 +100,47 @@ def main():
         "loss_net_usd",
     ]:
         if c in df.columns:
-            df[c] = pd.to_numeric(
-                df[c].str.replace(",", "", regex=False), errors="coerce"
-            )
+            df[c] = parse_money(df[c])
 
-    # ID si falta
-    if "event_id" not in df.columns or df["event_id"].isna().any():
-        df["event_id"] = (
-            df.get("unit_impacted", "").astype(str)
-            + "|"
-            + df.get("event_type", "").astype(str)
-            + "|"
-            + df.get("date_ident", "").astype(str)
-        ).fillna("")
-        df["event_id"] = df["event_id"].astype("category").cat.codes.astype(str)
+    # --- Moneda + USD canónico ---
+    if "currency" in df.columns:
+        df["currency"] = df["currency"].astype(str).str.upper().str.strip()
+    else:
+        df["currency"] = "USD"
+
+    fx_map = {"USD": 1.0, "US$": 1.0, "PEN": 1 / 3.70, "S/": 1 / 3.70}
+
+    def to_usd(amount, cur):
+        return float(amount) * float(fx_map.get(cur, 1.0))
+
+    usd = df.get("loss_net_usd", 0).fillna(0)
+    pen = df.get("loss_net", 0).fillna(0)
+    df["loss_value_usd"] = usd.where(
+        usd > 0, [to_usd(a, c) for a, c in zip(pen, df["currency"])]
+    )
+
+    # Auditoría
+    pos = (df["loss_value_usd"].fillna(0) > 0).sum()
+    total = float(df["loss_value_usd"].fillna(0).sum())
+    print(f"[CHK] loss_value_usd > 0: {pos} | suma USD: {total:,.2f}")
+
+    # ID: rellena faltantes y garantiza unicidad
+    if "event_id" not in df.columns:
+        df["event_id"] = ""
+    miss = df["event_id"].isna() | (df["event_id"].astype(str).str.strip() == "")
+    fb_all = (
+        df.get("unit_impacted", "").astype(str).str.strip()
+        + "|"
+        + df.get("event_type", "").astype(str).str.strip()
+        + "|"
+        + df.get("date_ident", "").astype(str)
+    )
+    codes_all = pd.Series(pd.factorize(fb_all)[0].astype(str), index=df.index)
+    df.loc[miss, "event_id"] = codes_all.loc[miss]
+    dup_rank = df.groupby("event_id").cumcount()
+    df.loc[dup_rank > 0, "event_id"] = (
+        df.loc[dup_rank > 0, "event_id"] + "_" + dup_rank[dup_rank > 0].astype(str)
+    )
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(OUT_PATH, index=False)

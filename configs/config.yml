@@ -1,6 +1,7 @@
 data:
-  input_path: data/raw/events.xlsx # cambia si tu archivo tiene otro nombre
+  input_path: data/raw/events.xlsx
   processed_path: data/processed/events.parquet
+  stage1_path: data/processed/events_stage1.parquet   # <-- nuevo (lo genera 01_read_normalize.py)
   var_params_path: data/processed/var_params.parquet
   id_column: event_id
   date_ident_col: date_ident
@@ -10,15 +11,36 @@ data:
 ml:
   seed: 42
   test_size: 0.25
-  threshold_strategy: max_f1 # max_f1 | recall_first
-  recall_target: 0.75 # usado si strategy=recall_first
+  threshold_strategy: recall_first     # max_f1 | recall_first
+  recall_target: 0.80
 
 var:
-  z_value: 1.645 # 95% confianza
-  horizon_T: 1.0 # 1 año
+  z_value: 1.645                       # 95%
+  horizon_T: 1.0                       # anual
   segment_keys: ["event_type", "unit_impacted", "product_service"]
 
+# --- NUEVO: cómo construir VA_seg y O_seg con datos reales ---
+var_build:
+  # cómo definir el segmento (usa los mismos que var.segment_keys)
+  segment_keys: ["event_type", "unit_impacted", "product_service"]
+
+  # ventana temporal para agregación (M=mensual)
+  resample_rule: "MS"
+
+  # VA_seg: escala de exposición del segmento
+  # opción robusta: percentil p de la pérdida mensual positiva (proxy si no tienes exposición explícita)
+  va_percentile: 95
+  min_va: 1000.0                       # piso para VA_seg
+
+  # O_seg: desviación estándar de la tasa de pérdida mensual = loss_month / VA_seg
+  # para robustez, winsorizamos las tasas mensuales antes del std
+  winsor_low: 1                        # percentil inferior
+  winsor_high: 99                      # percentil superior
+
+  # mínimos de datos para que el segmento sea válido
+  min_months: 6
+
 impact:
-  m_effectiveness: 0.5 # 50% mitigación
+  m_effectiveness: 0.5
   review_cost_per_alert: 0.0
   rc_pre: 2500000
