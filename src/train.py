@@ -13,6 +13,7 @@ from sklearn.metrics import (
 )
 from xgboost import XGBClassifier
 
+# ---------------- Config ----------------
 CFG = yaml.safe_load(Path("configs/config.yml").read_text())
 SEED = CFG["ml"]["seed"]
 TEST_SIZE = CFG["ml"]["test_size"]
@@ -22,9 +23,11 @@ RECALL_TARGET = CFG["ml"]["recall_target"]
 DATA_PATH = Path(CFG["data"]["processed_path"])
 MODEL_PATH = Path("models/model.pkl")
 THRESH_PATH = Path("models/threshold.json")
+SCHEMA_PATH = Path("models/feature_schema.json")
 
 
 def choose_threshold(y_true, proba, strategy="max_f1", recall_target=0.75):
+    """Selecciona el umbral según estrategia (máx F1 o Recall objetivo)."""
     p, r, th = precision_recall_curve(y_true, proba)
     f1 = (2 * p * r) / (p + r + 1e-9)
     if strategy == "max_f1":
@@ -40,26 +43,49 @@ def choose_threshold(y_true, proba, strategy="max_f1", recall_target=0.75):
 
 
 def main():
+    # --------- Lee dataset procesado ---------
     df = pd.read_parquet(DATA_PATH)
+
+    # y y X
     y = df["loss_event"].astype(int)
     X = df.drop(columns=["loss_event", "event_id"], errors="ignore")
 
+    # Columnas por tipo
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = X.select_dtypes(
         include=["number", "int", "float", "bool"]
     ).columns.tolist()
 
-    pre = ColumnTransformer(
-        [
-            ("num", StandardScaler(with_mean=False), num_cols),
+    # --------- NUEVO: guardar esquema de features ---------
+    feature_schema = {
+        "all_columns": X.columns.tolist(),
+        "num_cols": [c for c in X.columns if c in num_cols],
+        "cat_cols": [c for c in X.columns if c in cat_cols],
+    }
+    SCHEMA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCHEMA_PATH.write_text(json.dumps(feature_schema, indent=2), encoding="utf-8")
+    print(f"[OK] Esquema de features -> {SCHEMA_PATH}")
+    print(f"[INFO] num_cols={len(num_cols)} | cat_cols={len(cat_cols)}")
+
+    # --------- Preprocesamiento dinámico ---------
+    transformers = []
+    if num_cols:
+        transformers.append(("num", StandardScaler(with_mean=False), num_cols))
+    if cat_cols:
+        transformers.append(
             (
                 "cat",
                 OneHotEncoder(handle_unknown="ignore", sparse_output=True),
                 cat_cols,
-            ),
-        ]
-    )
+            )
+        )
 
+    if not transformers:
+        raise RuntimeError("No se detectaron columnas numéricas ni categóricas en X.")
+
+    pre = ColumnTransformer(transformers, remainder="drop")
+
+    # --------- Modelo ---------
     model = XGBClassifier(
         n_estimators=400,
         max_depth=6,
@@ -73,6 +99,7 @@ def main():
 
     pipe = Pipeline([("pre", pre), ("clf", model)])
 
+    # --------- Split, entrenamiento y umbral ---------
     X_tr, X_te, y_tr, y_te = train_test_split(
         X, y, test_size=TEST_SIZE, stratify=y, random_state=SEED
     )
@@ -81,6 +108,7 @@ def main():
     proba_tr = pipe.predict_proba(X_tr)[:, 1]
     th = choose_threshold(y_tr, proba_tr, TH_STRATEGY, RECALL_TARGET)
 
+    # --------- Evaluación rápida en test ---------
     proba_te = pipe.predict_proba(X_te)[:, 1]
     y_pred = (proba_te >= th).astype(int)
     metrics = {
@@ -91,6 +119,7 @@ def main():
     }
     print("[TEST]", metrics)
 
+    # --------- Guardar artefactos ---------
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipe, MODEL_PATH)
     THRESH_PATH.write_text(json.dumps({"threshold": th}, indent=2), encoding="utf-8")

@@ -1,0 +1,25 @@
+{
+  "input": {
+    "recall": 1.0,
+    "precision": 0.9911504424778761,
+    "m_effectiveness": 0.5,
+    "review_cost": 0.0,
+    "loss_mean": 10000.0,
+    "n_pos": 112,
+    "n_total": 287
+  },
+  "impact": {
+    "TP": 112.0,
+    "FN": 0.0,
+    "FP": 1.0000000000000016,
+    "L_base": 1120000.0,
+    "L_post": 560000.0,
+    "ahorro": 560000.0,
+    "ahorro_pct": 50.0
+  },
+  "rc": {
+    "rc_pre": 2500000,
+    "reduction_rho": 0.5,
+    "rc_post": 1250000.0
+  }
+}
